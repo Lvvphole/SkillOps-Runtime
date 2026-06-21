@@ -81,7 +81,25 @@ python -m skillops loop replay --run-id <run_id>
 
 # Inspect run status by id
 python -m skillops run status --run-id <run_id>
+
+# Evaluate UPSHIFT thresholds over run history; emit a promotion candidate
+python -m skillops skill promote-check --skill coding-pr-gate
+#   --dry-run     assess only, create no candidate
 ```
+
+## Skill promotion (v0: candidate only)
+
+`skill promote-check` mechanically evaluates the UPSHIFT thresholds against
+persisted run history — ≥3 successful comparable runs, ≥0.90 pass rate over the
+last 10, zero rollbacks, zero human overrides, candidate package validates, and
+the latest successful run replays — and **fails closed** otherwise. On pass it
+emits `PROMOTION_CANDIDATE_CREATED` with a candidate package reference,
+validation log, and promotion checklist, plus a durable candidate-registry
+record at `skills/<id>/candidate/promotion-record.json`.
+
+It **never** promotes to production: v0 forbids autonomous production skill
+mutation, so `SKILL_PROMOTED` remains schema-only and requires human approval
+beyond v0.
 
 ## Data model (SQLite, `artifacts/skillops.db`)
 

@@ -16,6 +16,7 @@ import os
 import sys
 from typing import List, Optional
 
+from skillops.promotion import evaluate_upshift, run_promotion_check
 from skillops.runtime import Engine, replay_run, status_run
 from skillops.schemas import SchemaError, validate_loop_file, validate_skill_file
 from skillops.store import Store
@@ -51,6 +52,31 @@ def cmd_skill_validate(args) -> int:
     print("SKILL VALIDATION: PASS")
     print(f"  skill_id={spec.skill_id} status={spec.status} version={spec.version}")
     return 0
+
+
+def cmd_skill_promote_check(args) -> int:
+    repo = _repo_root()
+    store = Store(_db_path(repo))
+    loop_id = args.loop or args.skill
+    if args.dry_run:
+        a = evaluate_upshift(store, args.skill, loop_id,
+                             os.path.join(repo, "skills", args.skill, "skill.yaml"))
+        print(a.to_log())
+        store.close()
+        return 0 if a.eligible else 2
+    result = run_promotion_check(repo, store, args.skill, loop_id)
+    if result.eligible:
+        print(f"PROMOTION: {result.terminal_state}")
+        print(f"  promo_run_id={result.promo_run_id}")
+        print(f"  artifacts_dir={result.artifacts_dir}")
+        print(f"  candidate_record={result.record_path}")
+    else:
+        a = evaluate_upshift(store, args.skill, loop_id,
+                             os.path.join(repo, "skills", args.skill, "skill.yaml"))
+        print("PROMOTION: BELOW_THRESHOLD (fail closed, no candidate created)")
+        print(a.to_log())
+    store.close()
+    return 0 if result.eligible else 2
 
 
 def cmd_loop_run(args) -> int:
@@ -126,6 +152,16 @@ def build_parser() -> argparse.ArgumentParser:
     sv = skill_sub.add_parser("validate", help="validate a SkillSpec manifest")
     sv.add_argument("--skill", required=True)
     sv.set_defaults(func=cmd_skill_validate)
+
+    spc = skill_sub.add_parser(
+        "promote-check",
+        help="evaluate UPSHIFT thresholds; emit PROMOTION_CANDIDATE_CREATED on pass")
+    spc.add_argument("--skill", required=True, help="skill id (skills/<id>/skill.yaml)")
+    spc.add_argument("--loop", default=None,
+                     help="comparable loop id (defaults to skill id)")
+    spc.add_argument("--dry-run", action="store_true",
+                     help="assess only; create no candidate")
+    spc.set_defaults(func=cmd_skill_promote_check)
 
     run = sub.add_parser("run", help="run inspection")
     run_sub = run.add_subparsers(dest="action", required=True)
