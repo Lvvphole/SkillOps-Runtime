@@ -191,7 +191,8 @@ class Engine:
                     e_ok = True
         if not (v_ok and e_ok):
             return TerminalState.FAIL_RECOVERABLE.value
-        if release and str(self.options.get("pr_url", "")).strip():
+        # PR-gated pass is decided by produced evidence, not by raw options.
+        if release and self.store.has_artifact(ctx.run_id, "pr-url.txt"):
             return TerminalState.PASS_CANDIDATE_PR_CREATED.value
         return TerminalState.PASS_TERMINAL.value
 
