@@ -2,6 +2,8 @@
 artifacts/
 skills/*/candidate/
 skills/*/promoted/
+# Agent-generated improvement candidate (produced at runtime by self-improve.yaml)
+loops/examples/improve-candidate.yaml
 *.db
 __pycache__/
 *.pyc
