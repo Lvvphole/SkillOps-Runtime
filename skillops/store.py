@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at TEXT NOT NULL,
     completed_at TEXT,
     artifacts_dir TEXT NOT NULL,
-    iteration INTEGER NOT NULL DEFAULT 0
+    iteration INTEGER NOT NULL DEFAULT 0,
+    parent_run_id TEXT
 );
 CREATE TABLE IF NOT EXISTS step_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,20 +108,35 @@ class Store:
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        # Backward-compatible: add columns absent in DBs created by older versions.
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(runs)")}
+        if "parent_run_id" not in cols:
+            self.conn.execute("ALTER TABLE runs ADD COLUMN parent_run_id TEXT")
 
     def close(self) -> None:
         self.conn.close()
 
     # ---- runs -------------------------------------------------------------
     def create_run(self, run_id: str, loop_id: str, loop_path: str,
-                   artifacts_dir: str) -> None:
+                   artifacts_dir: str, parent_run_id: Optional[str] = None) -> None:
         self.conn.execute(
             "INSERT INTO runs (run_id, loop_id, loop_path, status, started_at,"
-            " artifacts_dir, iteration) VALUES (?,?,?,?,?,?,0)",
-            (run_id, loop_id, loop_path, "RUNNING", now_iso(), artifacts_dir),
+            " artifacts_dir, iteration, parent_run_id) VALUES (?,?,?,?,?,?,0,?)",
+            (run_id, loop_id, loop_path, "RUNNING", now_iso(), artifacts_dir,
+             parent_run_id),
         )
         self.conn.commit()
+
+    def get_children(self, run_id: str) -> List[Dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM runs WHERE parent_run_id=? ORDER BY started_at",
+            (run_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def update_run(self, run_id: str, **fields: Any) -> None:
         if not fields:

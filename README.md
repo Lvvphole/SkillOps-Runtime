@@ -109,6 +109,29 @@ scrubbed) to `agent-output.log`, but pass is decided only by the resulting
 **staged diff** (the step escalates if the agent produced no change), then the
 **tests** and **verifier** gates. No adapter / no task / no change → fail closed.
 
+## Stacked (nested) loops
+
+A loop can **dispatch another loop** via the `run_subloop` step: the child runs
+as its own full run (own `run_id`, own terminal state) sharing one audit ledger.
+An outer governance loop can thus wrap an inner execution loop.
+
+```bash
+# stacked-parent dispatches stacked-child as a nested run
+python -m skillops loop run --loop loops/stacked-parent.yaml
+python -m skillops loop replay --run-id <parent_run_id>   # shows the child link
+```
+
+The `dispatch` step's params: `child_loop` (manifest path), `pass_states`
+(child terminal states that count as pass), `child_task`, `child_release`. The
+child can be **any** loop, including `coding-pr-gate-agent.yaml`.
+
+**Guardrails.** The child's mechanically-determined terminal state — not its
+narrative — decides the parent step. Nesting is bounded by `MAX_LOOP_DEPTH`
+(=3; deeper dispatch fails closed) so the run tree stays finite. **Release is
+not inherited**: children run with `release=False` unless a parent step sets
+`child_release: true`, so auto-merge/deploy stay off. Every child persists with
+its `parent_run_id`, so the full nested tree is replayable from one ledger.
+
 ## Skill promotion (v0: candidate only)
 
 `skill promote-check` mechanically evaluates the UPSHIFT thresholds against
