@@ -1,0 +1,58 @@
+# stacked-child — a minimal deterministic child loop dispatched by a parent.
+#
+# Any loop can be a child, including coding-pr-gate-agent.yaml. This one keeps
+# the demo deterministic (no agent CLI / API key): it produces the gate evidence
+# directly and self-verifies to PASS_TERMINAL.
+loop_id: stacked-child
+name: Stacked Child
+version: "0"
+max_iterations: 100
+default_branch: main
+
+terminal_states:
+  - PASS_TERMINAL
+  - FAIL_RECOVERABLE
+  - ESCALATED_WITH_BLOCKER
+
+steps:
+  - id: repo-path
+    owner: runtime
+    handler: record_repo_path
+    description: Confirm the repository checkout path exists.
+    produces: [repo-path-confirmation.txt]
+
+  - id: branch-safety
+    owner: runtime
+    handler: branch_safety
+    description: Record branch identity; forbid direct default-branch writes.
+    produces: [branch-safety.txt]
+
+  - id: implement
+    owner: executor
+    handler: noop
+    description: Stand-in unit of child work (replace with agent_execute for real use).
+    produces: [test-results.log]
+
+  - id: conflict-scan
+    owner: verifier
+    handler: conflict_scan
+    description: Fail if tracked files contain conflict markers.
+    produces: [conflict-marker-scan.txt]
+
+  - id: capture-diff
+    owner: executor
+    handler: capture_diff
+    description: Capture the child's diff as implementation evidence.
+    produces: [final-diff.patch]
+
+  - id: verify
+    owner: verifier
+    handler: verifier_report
+    description: Verify the child's artifacts, conflicts, secrets.
+    produces: [verification-report.md]
+
+  - id: evaluate
+    owner: evaluator
+    handler: evaluator_report
+    description: Score the child's verified artifacts.
+    produces: [evaluation-report.md]

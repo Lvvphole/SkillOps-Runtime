@@ -48,8 +48,11 @@ class Engine:
         run_id = new_run_id()
         adir = artifacts_dir_for(self.repo, run_id)
         os.makedirs(adir, exist_ok=True)
-        self.store.create_run(run_id, loop.loop_id, os.path.abspath(loop_path), adir)
-        self.log(f"run start run_id={run_id} loop={loop.loop_id}")
+        parent_run_id = self.options.get("_parent_run_id")
+        self.store.create_run(run_id, loop.loop_id, os.path.abspath(loop_path), adir,
+                              parent_run_id=parent_run_id)
+        self.log(f"run start run_id={run_id} loop={loop.loop_id}"
+                 + (f" parent={parent_run_id}" if parent_run_id else ""))
         return self._execute(run_id, loop, loop_path, adir, start_index=0)
 
     def resume(self, run_id: str) -> RunResult:
@@ -290,6 +293,10 @@ def replay_run(store: Store, run_id: str) -> Dict[str, object]:
                        "reason_code": d["reason_code"],
                        "next_action": d["next_action"]} for d in decisions],
         "artifacts": [{"name": a["name"], "sha256": a["sha256"][:12]} for a in artifacts],
+        "parent_run_id": run.get("parent_run_id"),
+        "children": [{"run_id": c["run_id"], "loop_id": c["loop_id"],
+                      "terminal_state": c["terminal_state"]}
+                     for c in store.get_children(run_id)],
         "missing_records": missing,
         "reconstructable": not missing and run["terminal_state"] is not None,
     }
@@ -312,6 +319,8 @@ def status_run(store: Store, run_id: str) -> Dict[str, object]:
                                                 "step_id": cp["step_id"],
                                                 "resume_pointer": cp["resume_pointer"]},
         "current_step": last_step,
+        "parent_run_id": run.get("parent_run_id"),
+        "children": [c["run_id"] for c in store.get_children(run_id)],
         "evidence_count": len(artifacts),
         "evidence": [a["name"] for a in artifacts],
         "started_at": run["started_at"],

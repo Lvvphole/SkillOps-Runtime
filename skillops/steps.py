@@ -155,6 +155,88 @@ def h_agent_execute(ctx: StepContext, step) -> StepResult:
 
 
 # --------------------------------------------------------------------------
+# stacked-loop handler (a loop dispatches a child loop as a nested run)
+# --------------------------------------------------------------------------
+MAX_LOOP_DEPTH = 3
+_DEFAULT_PASS_STATES = ["PASS_TERMINAL", "PASS_CANDIDATE_PR_CREATED"]
+
+
+def h_run_subloop(ctx: StepContext, step) -> StepResult:
+    """Dispatch a child loop as its own full run, sharing one audit ledger.
+
+    The child's mechanically-determined terminal state (not its narrative)
+    decides this step. Children do not release unless explicitly enabled, and
+    nesting is bounded by MAX_LOOP_DEPTH to keep the run tree finite — the
+    guardrail that makes deeper (eventually recursive) stacking safe.
+    """
+    # 1. Resolve child manifest (fail closed).
+    child_loop = step.params.get("child_loop")
+    if not child_loop:
+        return StepResult(ok=False, escalate=True, message="no child_loop specified")
+    child_path = child_loop if os.path.isabs(child_loop) else \
+        os.path.join(ctx.repo, child_loop)
+    if not os.path.exists(child_path):
+        return StepResult(ok=False, escalate=True,
+                          message=f"child loop manifest not found: {child_loop}")
+
+    # 2. Depth guard (the recursion guardrail).
+    depth = int(ctx.options.get("_loop_depth", 0))
+    if depth >= MAX_LOOP_DEPTH:
+        return StepResult(ok=False, escalate=True,
+                          message=f"max nesting depth {MAX_LOOP_DEPTH} reached")
+
+    # 3. Child options: pass through agent + task; release is NOT inherited.
+    child_opts = dict(ctx.options)
+    child_opts["_loop_depth"] = depth + 1
+    child_opts["_parent_run_id"] = ctx.run_id
+    child_opts["release"] = bool(step.params.get("child_release", False))
+    if step.params.get("child_task") is not None:
+        child_opts["task"] = step.params["child_task"]
+
+    # 4. Run the child (lazy import avoids the runtime->steps import cycle).
+    from skillops.runtime import Engine
+    child = Engine(ctx.repo, db_path=ctx.store.db_path, options=child_opts)
+    try:
+        child_result = child.run(child_path)
+    except Exception as exc:  # noqa: BLE001 - fail closed on child dispatch error
+        return StepResult(ok=False, escalate=True,
+                          message=f"child loop raised: {exc}")
+    finally:
+        child.store.close()
+
+    # 5. Mechanical mapping: child terminal state decides this step.
+    pass_states = step.params.get("pass_states") or _DEFAULT_PASS_STATES
+    ok = child_result.terminal_state in pass_states
+
+    # 6. Evidence (child artifacts referenced, not copied — one ledger).
+    payload = {
+        "child_run_id": child_result.run_id,
+        "child_loop": child_loop,
+        "terminal_state": child_result.terminal_state,
+        "artifacts_dir": child_result.artifacts_dir,
+        "pass_states": pass_states,
+        "passed": ok,
+        "depth": depth + 1,
+    }
+    res_name = write_artifact(ctx, "subloop-result.json",
+                              json.dumps(payload, indent=2) + "\n")
+    log_name = write_artifact(
+        ctx, "subloop-run.log",
+        f"child_run_id={child_result.run_id}\n"
+        f"child_loop={child_loop}\nterminal_state={child_result.terminal_state}\n"
+        f"passed={ok}\nartifacts_dir={child_result.artifacts_dir}\n")
+    evidence = [res_name, log_name]
+
+    if ok:
+        return StepResult(ok=True, evidence=evidence,
+                          outputs={"child_run_id": child_result.run_id},
+                          message=f"child loop {child_result.terminal_state}")
+    escalate = child_result.terminal_state == "ESCALATED_WITH_BLOCKER"
+    return StepResult(ok=False, escalate=escalate, evidence=evidence,
+                      message=f"child loop {child_result.terminal_state}")
+
+
+# --------------------------------------------------------------------------
 # coding-pr-gate handlers
 # --------------------------------------------------------------------------
 def h_record_repo_path(ctx: StepContext, step) -> StepResult:
@@ -370,6 +452,7 @@ HANDLERS: Dict[str, Callable[[StepContext, object], StepResult]] = {
     "always_fail": h_always_fail,
     "flaky": h_flaky,
     "agent_execute": h_agent_execute,
+    "run_subloop": h_run_subloop,
     "record_repo_path": h_record_repo_path,
     "verify_remote": h_verify_remote,
     "source_doc_inspection": h_source_doc_inspection,

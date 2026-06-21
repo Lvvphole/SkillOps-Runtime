@@ -1,0 +1,58 @@
+# stacked-parent — an outer governance loop that DISPATCHES a child loop.
+#
+# The `dispatch` step runs loops/stacked-child.yaml as its own full nested run
+# (own run_id, own terminal state) sharing one audit ledger. The child's
+# mechanically-determined terminal state decides the dispatch step; the parent
+# then verifies/evaluates over that result. Children do not release; nesting is
+# bounded by MAX_LOOP_DEPTH.
+loop_id: stacked-parent
+name: Stacked Parent
+version: "0"
+max_iterations: 200
+default_branch: main
+
+terminal_states:
+  - PASS_TERMINAL
+  - FAIL_RECOVERABLE
+  - ESCALATED_WITH_BLOCKER
+
+steps:
+  - id: repo-path
+    owner: runtime
+    handler: record_repo_path
+    description: Confirm the repository checkout path exists.
+    produces: [repo-path-confirmation.txt]
+
+  - id: branch-safety
+    owner: runtime
+    handler: branch_safety
+    description: Record branch identity; forbid direct default-branch writes.
+    produces: [branch-safety.txt]
+
+  - id: dispatch
+    owner: governor
+    handler: run_subloop
+    description: Dispatch the child loop as a nested run; child terminal state decides pass.
+    produces: [subloop-result.json, subloop-run.log]
+    params:
+      child_loop: loops/stacked-child.yaml
+      pass_states: [PASS_TERMINAL]
+      child_release: false
+
+  - id: tests
+    owner: executor
+    handler: noop
+    description: Parent-level check (stand-in) over the dispatched result.
+    produces: [test-results.log]
+
+  - id: verify
+    owner: verifier
+    handler: verifier_report
+    description: Verify the parent's artifacts including the subloop result.
+    produces: [verification-report.md]
+
+  - id: evaluate
+    owner: evaluator
+    handler: evaluator_report
+    description: Score the parent's verified artifacts.
+    produces: [evaluation-report.md]
