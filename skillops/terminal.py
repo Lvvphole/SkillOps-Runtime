@@ -65,6 +65,9 @@ REQUIRED_EVIDENCE: Dict[str, List[str]] = {
     ],
     TerminalState.PROMOTION_CANDIDATE_CREATED.value: [
         "terminal-state.json",
+        "promotion-candidate-package.json",
+        "promotion-validation.log",
+        "promotion-checklist.md",
     ],
     TerminalState.SKILL_PROMOTED.value: [
         "terminal-state.json",
