@@ -6,9 +6,13 @@ PR-gated, auditable software-delivery units by requiring code changes, tests,
 evidence artifacts, terminal state, clean git state, pushed branch, and PR URL
 before the loop can pass.
 
-This repository contains **SkillOps LoopStack v0**: a checkpointed loop kernel
-that converts coding-agent output into replayable, evidence-verified, resumable,
-PR-gated software-delivery runs.
+This repository contains **SkillOps LoopStack**: a checkpointed loop kernel that
+converts coding-agent output into replayable, evidence-verified, resumable,
+PR-gated software-delivery runs. Beyond verifying a diff you hand it, the kernel
+now also **drives** a coding agent to produce the work inside the loop,
+**stacks** loops (depth-capped nesting), and proposes **gate-verified
+self-improvements as PRs** — all under the same rule: nothing passes because an
+agent says it passed.
 
 ## Core rule
 
@@ -16,9 +20,25 @@ PR-gated software-delivery runs.
 > LoopStack can **replay** the run, **verify** the evidence, **resume** from
 > checkpoints, and emit a **valid terminal state**.
 
-Agent explanations, summaries, and confidence statements are never evidence.
+Agent explanations, summaries, and confidence statements are never evidence —
+neither are an agent's claims that it implemented a change or that a change is an
+improvement. Diffs, tests, the verifier, and the regression gate decide, from
+the persisted ledger.
 
-## Non-negotiable execution rules (v0)
+## Capabilities
+
+The kernel composes three evidence-gated pillars (detailed sections below):
+
+1. **[Agent-driven mode](#agent-driven-mode-referee--driver)** — a loop step
+   drives a real coding agent to generate the diff; the agent's narrative is
+   never evidence.
+2. **[Stacked (nested) loops](#stacked-nested-loops)** — a loop dispatches a
+   child loop as its own ledgered run, bounded by `MAX_LOOP_DEPTH`.
+3. **[Recursive self-improvement](#recursive-self-improvement-bounded-gated)** —
+   a meta-loop generates a candidate loop, re-runs it, and a regression gate
+   mechanically confirms the improvement before emitting a PR.
+
+## Non-negotiable execution rules
 
 - **Manifest is the source of truth.** The runtime executes only registered
   loops, registered handlers, defined steps, defined terminal states, and
@@ -34,15 +54,32 @@ Agent explanations, summaries, and confidence statements are never evidence.
   verifier, and evaluator gates pass.
 - **Terminal states map to evidence.** A terminal state is valid only if it is
   registered in the manifest **and** every mapped artifact exists for the run.
-- **No auto-merge and no auto-deploy in v0.** A PR may be created; nothing is
-  merged or deployed automatically. Agent-authored skills enter the registry as
-  `candidate` only.
+- **No auto-merge and no auto-deploy.** A PR may be created; nothing is merged or
+  deployed automatically. Agent-authored skills and self-improvement candidates
+  enter the registry as `candidate` only; promotion to production is
+  human-gated.
 
-## v0 scope
+## Scope
 
-Checkpointed loop kernel + schemas + SQLite persistence + Governor v0 + CLI +
-tests + Git/PR gates + one reference loop (`coding-pr-gate`). No dashboard, no
-chat integrations, no hot-reload, no autonomous production skill mutation.
+Checkpointed loop kernel + schemas + SQLite persistence + Governor + CLI + tests
++ Git/PR gates. Loops: a `coding-pr-gate` reference loop and its agent-driven
+variant, a stacked parent/child pair, and a self-improvement meta-loop (see
+**Loop catalog**). Step handlers added beyond the base gates: `agent_execute`
+(drive an agent), `run_subloop` (dispatch a child loop), `regression_gate`
+(mechanically compare candidate vs. baseline). No dashboard, no chat
+integrations, no hot-reload, **no auto-merge / no auto-deploy**, and no
+autonomous production/skill promotion.
+
+## Loop catalog
+
+| manifest | role |
+|----------|------|
+| `loops/coding-pr-gate.yaml` | verify a diff you hand it (reference loop) |
+| `loops/coding-pr-gate-agent.yaml` | **drive** an agent to generate the diff inside the loop |
+| `loops/stacked-parent.yaml` | dispatches a child loop as a nested run |
+| `loops/stacked-child.yaml` | minimal child loop (any loop can be a child) |
+| `loops/self-improve.yaml` | meta-loop: baseline → agent candidate → re-run → regression gate → PR |
+| `loops/examples/improve-target.yaml` | deliberately failing baseline fixture for `self-improve` |
 
 ## Local path / GitHub repo
 
@@ -73,13 +110,18 @@ python -m skillops loop run --loop loops/coding-pr-gate.yaml
 #   --release            enable commit/push/PR-gated steps
 #   --pr-url <URL>       required for PASS_CANDIDATE_PR_CREATED
 
+# Agent-driven / stacked / self-improving loops (same CLI)
+python -m skillops loop run --loop loops/coding-pr-gate-agent.yaml
+python -m skillops loop run --loop loops/stacked-parent.yaml
+python -m skillops loop run --loop loops/self-improve.yaml
+
 # Resume from the last successful checkpoint (no completed step is rerun)
 python -m skillops loop resume --run-id <run_id>
 
-# Replay run history from persisted records
+# Replay run history from persisted records (surfaces parent_run_id + children)
 python -m skillops loop replay --run-id <run_id>
 
-# Inspect run status by id
+# Inspect run status by id (also reports parent_run_id + child run ids)
 python -m skillops run status --run-id <run_id>
 
 # Evaluate UPSHIFT thresholds over run history; emit a promotion candidate
@@ -188,7 +230,7 @@ skill fails closed.
 
 | table | purpose |
 |-------|---------|
-| `runs` | run id, loop id, status, terminal state, timestamps, artifacts dir |
+| `runs` | run id, loop id, status, terminal state, timestamps, artifacts dir, `parent_run_id` (nested runs) |
 | `step_runs` | step id, owner role, status, inputs, outputs, attempt, evidence |
 | `checkpoints` | run/step, sequence, state snapshot, resume pointer |
 | `decisions` | Governor decision, reason code, input-state hash, next action |
@@ -201,7 +243,9 @@ checkpoint; every loop-direction choice writes a decision record.
 
 Decisions: `CONTINUE`, `RETRY`, `DOWNSHIFT`, `UPSHIFT`, `ESCALATE`, `STOP`.
 The Governor decides only from gate results and the recorded attempt count
-(same-failure limit = 3, iteration cap is mechanical).
+(same-failure limit = 3, iteration cap is mechanical). `UPSHIFT` is exercised by
+the promotion path when the candidate clears every threshold; `DOWNSHIFT` is
+reserved for future level transitions.
 
 ## Terminal states
 
@@ -261,4 +305,6 @@ python -m pytest -q
 Covers schemas, manifest source-of-truth, command discovery, run/step/
 checkpoint/decision/evidence persistence, Governor decisions, resume, replay,
 terminal-state validation, branch safety, conflict-marker detection, release
-lock, and PR evidence mapping.
+lock, and PR evidence mapping — plus the three pillars: agent-driven execution
+(`test_agent_execute.py`), stacked/nested loops with ledger linkage
+(`test_stacked_loops.py`), and gated self-improvement (`test_self_improve.py`).
