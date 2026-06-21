@@ -87,6 +87,28 @@ python -m skillops skill promote-check --skill coding-pr-gate
 #   --dry-run     assess only, create no candidate
 ```
 
+## Agent-driven mode (referee → driver)
+
+`loops/coding-pr-gate.yaml` *verifies a diff you hand it*.
+`loops/coding-pr-gate-agent.yaml` adds an `implement` step that **drives a real
+coding agent to generate the diff inside the loop** — the harness becomes a
+driver, with every existing gate as the agent's safety rail.
+
+```bash
+# task.md describes the change; the agent CLI is configured in the manifest
+python -m skillops loop run --loop loops/coding-pr-gate-agent.yaml
+```
+
+Configure the agent in the `implement` step (`skillops/agents.py`):
+- `agent: shell` + `command: ["claude", "-p"]` (or `codex`, `cursor-agent`), or
+- pass a programmatic adapter: `Engine(options={"agent_adapter": <callable>,
+  "task": "..."})`.
+
+**The agent's narrative is never evidence.** Its stdout is logged (secret-
+scrubbed) to `agent-output.log`, but pass is decided only by the resulting
+**staged diff** (the step escalates if the agent produced no change), then the
+**tests** and **verifier** gates. No adapter / no task / no change → fail closed.
+
 ## Skill promotion (v0: candidate only)
 
 `skill promote-check` mechanically evaluates the UPSHIFT thresholds against

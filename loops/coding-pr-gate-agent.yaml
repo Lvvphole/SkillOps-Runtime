@@ -1,0 +1,146 @@
+# coding-pr-gate-agent — the driver variant of coding-pr-gate.
+#
+# Same gates as coding-pr-gate, but an `implement` step DRIVES a real coding
+# agent to generate the change inside the loop. The agent's narrative is logged,
+# never trusted: only the resulting diff + tests + verifier decide the terminal
+# state. Configure the agent via the implement step's params (a real CLI such as
+# `claude -p` / `codex`) or pass a programmatic adapter through engine options.
+loop_id: coding-pr-gate-agent
+name: Coding PR Gate (agent-driven)
+version: "0"
+max_iterations: 500
+default_branch: main
+
+skills:
+  - coding-pr-gate
+
+forbidden_paths:
+  - artifacts/
+  - .git/
+  - "**/__pycache__/**"
+  - "*.env"
+  - secrets/
+
+terminal_states:
+  - PASS_TERMINAL
+  - PASS_CANDIDATE_PR_CREATED
+  - FAIL_RECOVERABLE
+  - FAIL_PATCH_PR_CREATED
+  - ESCALATED_WITH_BLOCKER
+
+steps:
+  - id: repo-path
+    owner: runtime
+    handler: record_repo_path
+    description: Confirm the repository checkout path exists.
+    produces: [repo-path-confirmation.txt]
+
+  - id: remote-verify
+    owner: runtime
+    handler: verify_remote
+    description: Verify git remote matches the required GitHub repository.
+    produces: [git-remote-verification.txt]
+    params:
+      expect_substring: SkillOps-Runtime
+
+  - id: source-docs
+    owner: runtime
+    handler: source_doc_inspection
+    description: Inspect source docs before command choice.
+    produces: [source-doc-inspection.md]
+
+  - id: command-discovery
+    owner: runtime
+    handler: command_discovery
+    description: Discover validation/test commands from source docs only.
+    produces: [command-discovery.md]
+
+  - id: git-status
+    owner: runtime
+    handler: git_status
+    description: Capture working-tree status before changes.
+    produces: [git-status-before.txt]
+
+  - id: branch-safety
+    owner: runtime
+    handler: branch_safety
+    description: Record branch identity; forbid direct default-branch writes.
+    produces: [branch-safety.txt]
+
+  - id: pull-sync
+    owner: runtime
+    handler: pull_sync
+    description: Fetch/sync the branch or record proof it is current.
+    produces: [pull-sync.txt]
+
+  - id: implement
+    owner: executor
+    handler: agent_execute
+    description: Drive the coding agent to implement the task; require a real diff.
+    produces: [agent-task.md, agent-output.log]
+    params:
+      # For real use, set a configured agent CLI, e.g.:
+      #   agent: shell
+      #   command: ["claude", "-p"]
+      # Or pass options={"agent_adapter": <callable>, "task": "..."} to Engine.
+      task_file: task.md
+
+  - id: manifest-validate
+    owner: verifier
+    handler: validate_manifest
+    description: Re-validate the LoopSpec manifest as a gate.
+    produces: [loop-validate.log]
+
+  - id: tests
+    owner: executor
+    handler: run_tests
+    description: Run the discovered test command against the agent's output.
+    produces: [test-results.log]
+    params:
+      command: ["python", "-m", "pytest", "-q"]
+
+  - id: conflict-scan
+    owner: verifier
+    handler: conflict_scan
+    description: Fail if tracked files contain conflict markers.
+    produces: [conflict-marker-scan.txt]
+
+  - id: capture-diff
+    owner: executor
+    handler: capture_diff
+    description: Capture the agent's diff as implementation evidence.
+    produces: [final-diff.patch]
+
+  - id: verify
+    owner: verifier
+    handler: verifier_report
+    description: Verify artifacts, checkpoints, decisions, conflicts, secrets.
+    produces: [verification-report.md]
+
+  - id: evaluate
+    owner: evaluator
+    handler: evaluator_report
+    description: Score verified artifacts against the loop contract.
+    produces: [evaluation-report.md]
+
+  # ---- release-gated (only with --release) ----
+  - id: release-commit
+    owner: executor
+    handler: release_commit
+    release: true
+    description: Record post-commit clean working-tree status.
+    produces: [post-commit-status.txt]
+
+  - id: release-push
+    owner: executor
+    handler: release_push
+    release: true
+    description: Push the feature branch; hard-stop on failure.
+    produces: [push-output.txt]
+
+  - id: release-pr
+    owner: executor
+    handler: release_pr
+    release: true
+    description: Record PR URL and PR documentation (no auto-merge in v0).
+    produces: [pr-url.txt, pr-body.md]

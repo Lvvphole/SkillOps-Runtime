@@ -11,10 +11,11 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List
 
 from skillops import gitsafety
+from skillops.agents import resolve_agent_adapter
 from skillops.evaluator import evaluate_run
 from skillops.schemas import validate_loop_file
 from skillops.store import Store
-from skillops.verifier import verify_run
+from skillops.verifier import SECRET_PATTERNS, verify_run
 
 
 @dataclass
@@ -79,6 +80,78 @@ def h_flaky(ctx: StepContext, step) -> StepResult:
         ev = [write_artifact(ctx, n, f"flaky ok via {env}\n") for n in step.produces]
         return StepResult(ok=True, evidence=ev, message="flaky passed")
     return StepResult(ok=False, message=f"flaky blocked (set {env})")
+
+
+def _scrub_secrets(text: str) -> str:
+    red = text
+    for pat in SECRET_PATTERNS:
+        red = pat.sub("[REDACTED]", red)
+    return red
+
+
+# --------------------------------------------------------------------------
+# agent-execution handler (referee -> driver)
+# --------------------------------------------------------------------------
+def h_agent_execute(ctx: StepContext, step) -> StepResult:
+    """Drive a real coding agent to implement the task inside the loop.
+
+    The agent's narrative output is logged but NEVER used to decide pass: only
+    the resulting staged diff (this step), then tests + verifier (later steps)
+    determine the terminal state. Fails closed without a task or an adapter, and
+    escalates if the agent produces no change.
+    """
+    # 1. Task spec.
+    task = None
+    task_file = step.params.get("task_file")
+    if task_file:
+        path = os.path.join(ctx.repo, task_file)
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as fh:
+                task = fh.read()
+    if task is None:
+        task = ctx.options.get("task")
+    if not task or not str(task).strip():
+        return StepResult(ok=False, escalate=True, message="no task spec provided")
+    task = str(task)
+
+    # 2. Resolve adapter (fail closed).
+    adapter = resolve_agent_adapter(ctx, step)
+    if adapter is None:
+        return StepResult(ok=False, escalate=True,
+                          message="no agent adapter/auth available")
+
+    # 3. Snapshot pre-state, then run the agent (it edits the working tree).
+    gitsafety.run(["git", "add", "-A"], ctx.repo)
+    _rc, before = gitsafety.run(["git", "diff", "--cached", "HEAD"], ctx.repo)
+    try:
+        run = adapter(ctx, task)
+    except Exception as exc:  # noqa: BLE001 - fail closed on adapter error
+        return StepResult(ok=False, escalate=True,
+                          message=f"agent adapter raised: {exc}")
+
+    # 4. Require a real change INTRODUCED BY THE AGENT (closes "code changes"
+    #    gap; pre-existing dirty state does not count).
+    gitsafety.run(["git", "add", "-A"], ctx.repo)
+    _rc, after = gitsafety.run(["git", "diff", "--cached", "HEAD"], ctx.repo)
+    changed = after.strip() != before.strip()
+
+    # 5. Evidence (narrative logged, secret-scrubbed, NOT used to decide pass).
+    task_name = write_artifact(ctx, "agent-task.md", f"# Agent task\n\n{task}\n")
+    log_name = write_artifact(
+        ctx, "agent-output.log",
+        f"adapter_ok={run.ok}\nmessage={run.message}\nchanged={changed}\n\n"
+        f"--- agent output (narrative, NOT evidence) ---\n"
+        f"{_scrub_secrets(run.output or '')}\n")
+    evidence = [task_name, log_name]
+
+    if not run.ok:
+        return StepResult(ok=False, escalate=True, evidence=evidence,
+                          message="agent adapter reported failure")
+    if not changed:
+        return StepResult(ok=False, escalate=True, evidence=evidence,
+                          message="agent produced no change")
+    return StepResult(ok=True, evidence=evidence, outputs={"changed": True},
+                      message="agent implemented task")
 
 
 # --------------------------------------------------------------------------
@@ -296,6 +369,7 @@ HANDLERS: Dict[str, Callable[[StepContext, object], StepResult]] = {
     "noop": h_noop,
     "always_fail": h_always_fail,
     "flaky": h_flaky,
+    "agent_execute": h_agent_execute,
     "record_repo_path": h_record_repo_path,
     "verify_remote": h_verify_remote,
     "source_doc_inspection": h_source_doc_inspection,
