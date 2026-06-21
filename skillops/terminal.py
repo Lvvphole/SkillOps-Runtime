@@ -71,6 +71,11 @@ REQUIRED_EVIDENCE: Dict[str, List[str]] = {
     ],
     TerminalState.SKILL_PROMOTED.value: [
         "terminal-state.json",
+        "promotion-record.json",
+        "test-results.log",
+        "replay-report.json",
+        "verifier-approval.json",
+        "registry-update.json",
     ],
 }
 
