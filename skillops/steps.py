@@ -226,20 +226,69 @@ def h_release_commit(ctx: StepContext, step) -> StepResult:
 
 
 def h_release_push(ctx: StepContext, step) -> StepResult:
-    out = str(ctx.options.get("push_output", "push deferred in v0 (no auto-push)\n"))
-    name = write_artifact(ctx, "push-output.txt", out)
-    ok = "error" not in out.lower() and "fail" not in out.lower()
-    return StepResult(ok=ok, evidence=[name], escalate=not ok)
+    """Push the current branch. Real git push by default; an explicit
+    options['push_output'] is accepted as recorded proof of an external push.
+    A failed push hard-stops the loop (escalate)."""
+    explicit = ctx.options.get("push_output")
+    if explicit is not None:
+        out = str(explicit)
+        ok = "error" not in out.lower() and "fail" not in out.lower()
+        name = write_artifact(ctx, "push-output.txt", out)
+        return StepResult(ok=ok, evidence=[name], escalate=not ok,
+                          message="recorded external push")
+    branch = gitsafety.current_branch(ctx.repo)
+    rc, out = gitsafety.run(["git", "push", "-u", "origin", branch], ctx.repo)
+    body = f"$ git push -u origin {branch}\nexit={rc}\n\n{out}\n"
+    name = write_artifact(ctx, "push-output.txt", body)
+    ok = rc == 0
+    return StepResult(ok=ok, evidence=[name], escalate=not ok,
+                      outputs={"exit": rc, "branch": branch},
+                      message="pushed" if ok else "push FAILED")
+
+
+def _render_pr_body(ctx: StepContext, pr_url: str) -> str:
+    """Generate PR documentation with the contract-required sections."""
+    arts = [a["name"] for a in ctx.store.get_artifacts(ctx.run_id)]
+    custom = ctx.options.get("pr_body")
+    if custom:
+        return str(custom)
+    return (
+        "# Pull Request\n\n"
+        f"## Summary\nAutomated release from loop `{ctx.loop.loop_id}` "
+        f"(run `{ctx.run_id}`).\n\n"
+        "## Architecture\nSee README data-model and CLI sections.\n\n"
+        "## Files changed\nSee final-diff.patch artifact.\n\n"
+        "## Tests run\n`python -m pytest -q` (see test-results.log).\n\n"
+        f"## Validation evidence\nrun_id={ctx.run_id}; artifacts: {', '.join(arts)}\n\n"
+        "## Risks\nRelease handlers perform real push + adapter PR creation.\n\n"
+        "## Rollback plan\nRevert the merge commit; additions are self-contained.\n\n"
+        "## Limitations\nv0: no auto-merge, no auto-deploy.\n\n"
+        f"## PR URL\n{pr_url}\n"
+    )
 
 
 def h_release_pr(ctx: StepContext, step) -> StepResult:
-    pr_url = str(ctx.options.get("pr_url", "")).strip()
+    """Record the PR via an adapter, fail closed if none can produce a URL.
+
+    Precedence (adapters cannot own completion; the loop records/validates):
+      1. options['pr_adapter']  -> callable(ctx) returning a URL (programmatic)
+      2. options['pr_url']      -> explicit URL (e.g. fed by the MCP/gh adapter)
+    """
+    pr_url = ""
+    adapter = ctx.options.get("pr_adapter")
+    if callable(adapter):
+        try:
+            pr_url = str(adapter(ctx)).strip()
+        except Exception as exc:  # noqa: BLE001 - fail closed on adapter error
+            return StepResult(ok=False, escalate=True,
+                              message=f"pr_adapter failed: {exc}")
+    if not pr_url:
+        pr_url = str(ctx.options.get("pr_url", "")).strip()
     if not pr_url:
         return StepResult(ok=False, escalate=True,
-                          message="no PR URL provided; cannot pass PR-gated state")
+                          message="no PR URL produced; cannot pass PR-gated state")
     n1 = write_artifact(ctx, "pr-url.txt", pr_url + "\n")
-    n2 = write_artifact(ctx, "pr-body.md", str(ctx.options.get(
-        "pr_body", "# PR\n\nSummary, architecture, files, tests, risks, rollback.\n")))
+    n2 = write_artifact(ctx, "pr-body.md", _render_pr_body(ctx, pr_url))
     return StepResult(ok=True, evidence=[n1, n2], outputs={"pr_url": pr_url})
 
 
