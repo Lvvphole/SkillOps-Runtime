@@ -1,0 +1,39 @@
+# Durable skill package for the coding-pr-gate reference loop.
+# Agent-authored skills enter the registry as candidates only; they cannot be
+# auto-promoted in v0 (promotion requires validation, tests, replay, verifier
+# approval, and a promotion record).
+skill_id: coding-pr-gate
+name: Coding PR Gate Skill
+version: "0"
+owner: executor
+status: candidate
+
+inputs:
+  - loop_manifest
+  - repo_checkout
+  - feature_branch
+
+outputs:
+  - terminal_state_report
+  - verification_report
+  - evaluation_report
+  - pr_url
+
+commands:
+  - "python -m skillops loop validate --loop loops/coding-pr-gate.yaml"
+  - "python -m skillops loop run --loop loops/coding-pr-gate.yaml"
+  - "python -m pytest -q"
+
+evidence:
+  - repo-path-confirmation.txt
+  - git-remote-verification.txt
+  - command-discovery.md
+  - source-doc-inspection.md
+  - branch-safety.txt
+  - test-results.log
+  - final-diff.patch
+  - verification-report.md
+  - evaluation-report.md
+  - terminal-state.json
+  - pr-url.txt
+  - pr-body.md
