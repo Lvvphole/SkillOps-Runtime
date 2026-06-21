@@ -206,34 +206,121 @@ def h_run_subloop(ctx: StepContext, step) -> StepResult:
 
     # 5. Mechanical mapping: child terminal state decides this step.
     pass_states = step.params.get("pass_states") or _DEFAULT_PASS_STATES
-    ok = child_result.terminal_state in pass_states
+    passed = child_result.terminal_state in pass_states
+    # record_only: capture the child outcome without failing the parent step
+    # (used to record a baseline that may legitimately fail; a later gate decides).
+    record_only = bool(step.params.get("record_only", False))
 
     # 6. Evidence (child artifacts referenced, not copied — one ledger).
+    result_name = str(step.params.get("result_name", "subloop-result.json"))
     payload = {
         "child_run_id": child_result.run_id,
         "child_loop": child_loop,
         "terminal_state": child_result.terminal_state,
         "artifacts_dir": child_result.artifacts_dir,
         "pass_states": pass_states,
-        "passed": ok,
+        "passed": passed,
         "depth": depth + 1,
     }
-    res_name = write_artifact(ctx, "subloop-result.json",
-                              json.dumps(payload, indent=2) + "\n")
+    res_name = write_artifact(ctx, result_name, json.dumps(payload, indent=2) + "\n")
     log_name = write_artifact(
         ctx, "subloop-run.log",
         f"child_run_id={child_result.run_id}\n"
         f"child_loop={child_loop}\nterminal_state={child_result.terminal_state}\n"
-        f"passed={ok}\nartifacts_dir={child_result.artifacts_dir}\n")
+        f"passed={passed}\nrecord_only={record_only}\n"
+        f"artifacts_dir={child_result.artifacts_dir}\n")
     evidence = [res_name, log_name]
+    outputs = {"child_run_id": child_result.run_id,
+               "terminal_state": child_result.terminal_state}
 
-    if ok:
-        return StepResult(ok=True, evidence=evidence,
-                          outputs={"child_run_id": child_result.run_id},
-                          message=f"child loop {child_result.terminal_state}")
+    if passed or record_only:
+        return StepResult(ok=True, evidence=evidence, outputs=outputs,
+                          message=f"child loop {child_result.terminal_state}"
+                                  + (" (record_only)" if record_only and not passed else ""))
     escalate = child_result.terminal_state == "ESCALATED_WITH_BLOCKER"
-    return StepResult(ok=False, escalate=escalate, evidence=evidence,
+    return StepResult(ok=False, escalate=escalate, evidence=evidence, outputs=outputs,
                       message=f"child loop {child_result.terminal_state}")
+
+
+# --------------------------------------------------------------------------
+# recursive self-improvement: regression gate (improvement verified, not claimed)
+# --------------------------------------------------------------------------
+SUCCESS_STATES = {"PASS_TERMINAL", "PASS_CANDIDATE_PR_CREATED"}
+
+
+def _child_run_id_for(store: Store, run_id: str, step_id: str):
+    """The child run id recorded by a run_subloop step (from persisted outputs)."""
+    for row in store.get_steps(run_id):
+        if row["step_id"] == step_id and row["status"] == "COMPLETED":
+            outs = json.loads(row["outputs"] or "{}")
+            if outs.get("child_run_id"):
+                return outs["child_run_id"]
+    return None
+
+
+def _run_score(store: Store, child_run_id: str):
+    """Mechanical score of a run from the ledger: (pass_flag, evidence_count)."""
+    run = store.get_run(child_run_id) or {}
+    pass_flag = 1 if run.get("terminal_state") in SUCCESS_STATES else 0
+    evidence_count = len(store.get_artifacts(child_run_id))
+    return pass_flag, evidence_count, run.get("terminal_state"), run.get("loop_path")
+
+
+def h_regression_gate(ctx: StepContext, step) -> StepResult:
+    """Decide whether the candidate loop improves on the baseline, from the
+    persisted ledger — never from the agent's narrative. Fails closed if the
+    candidate is not a pass, regresses below baseline, or is the SAME manifest as
+    the baseline (no in-place self-modification)."""
+    baseline_step = step.params.get("baseline_step")
+    candidate_step = step.params.get("candidate_step")
+    if not baseline_step or not candidate_step:
+        return StepResult(ok=False, escalate=True,
+                          message="baseline_step and candidate_step required")
+
+    base_id = _child_run_id_for(ctx.store, ctx.run_id, baseline_step)
+    cand_id = _child_run_id_for(ctx.store, ctx.run_id, candidate_step)
+    if not base_id or not cand_id:
+        return StepResult(ok=False, escalate=True,
+                          message="missing baseline/candidate child run record")
+
+    b_pass, b_ev, b_term, b_path = _run_score(ctx.store, base_id)
+    c_pass, c_ev, c_term, c_path = _run_score(ctx.store, cand_id)
+    baseline_score = (b_pass, b_ev)
+    candidate_score = (c_pass, c_ev)
+
+    # Guardrail: candidate must be a SEPARATE manifest (no self-mutation).
+    same_manifest = bool(b_path) and os.path.abspath(b_path) == os.path.abspath(c_path or "")
+    non_regression = (not same_manifest) and bool(c_pass) and candidate_score >= baseline_score
+    improved = non_regression and candidate_score > baseline_score
+
+    payload = {
+        "baseline_run_id": base_id, "candidate_run_id": cand_id,
+        "baseline_loop_path": b_path, "candidate_loop_path": c_path,
+        "baseline_terminal": b_term, "candidate_terminal": c_term,
+        "baseline_score": list(baseline_score), "candidate_score": list(candidate_score),
+        "same_manifest": same_manifest,
+        "non_regression": non_regression, "improved": improved,
+    }
+    res = write_artifact(ctx, "regression-gate.json", json.dumps(payload, indent=2) + "\n")
+    report = write_artifact(
+        ctx, "improvement-report.md",
+        "# Improvement report\n\n"
+        f"- baseline: {b_term} score={list(baseline_score)} ({b_path})\n"
+        f"- candidate: {c_term} score={list(candidate_score)} ({c_path})\n"
+        f"- same_manifest: {same_manifest}\n"
+        f"- non_regression: {non_regression}\n- improved: {improved}\n\n"
+        "Decision is mechanical (terminal state + evidence count from the "
+        "ledger); the agent's claims are not evidence.\n")
+    evidence = [res, report]
+
+    if not non_regression:
+        reason = ("candidate is the same manifest as baseline" if same_manifest
+                  else f"candidate did not improve ({c_term} score={list(candidate_score)} "
+                       f"vs baseline {b_term} {list(baseline_score)})")
+        return StepResult(ok=False, escalate=True, evidence=evidence, message=reason)
+    return StepResult(ok=True, evidence=evidence,
+                      outputs={"improved": improved, "non_regression": True},
+                      message=f"candidate verified (improved={improved})")
 
 
 # --------------------------------------------------------------------------
@@ -453,6 +540,7 @@ HANDLERS: Dict[str, Callable[[StepContext, object], StepResult]] = {
     "flaky": h_flaky,
     "agent_execute": h_agent_execute,
     "run_subloop": h_run_subloop,
+    "regression_gate": h_regression_gate,
     "record_repo_path": h_record_repo_path,
     "verify_remote": h_verify_remote,
     "source_doc_inspection": h_source_doc_inspection,

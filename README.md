@@ -132,6 +132,32 @@ not inherited**: children run with `release=False` unless a parent step sets
 `child_release: true`, so auto-merge/deploy stay off. Every child persists with
 its `parent_run_id`, so the full nested tree is replayable from one ledger.
 
+## Recursive self-improvement (bounded, gated)
+
+`loops/self-improve.yaml` is a **meta-loop**: it runs a target loop to record a
+**baseline**, drives the agent to write an **improved candidate loop** (a
+*separate* manifest), re-runs the candidate, and a mechanical **regression gate**
+confirms the candidate is not worse than baseline — then emits a PR.
+
+```bash
+python -m skillops loop run --loop loops/self-improve.yaml            # gate only
+python -m skillops loop run --loop loops/self-improve.yaml --release  # + candidate PR
+```
+
+The decision is **verified, not claimed**: `regression_gate` reads each run's
+terminal state + evidence count *from the ledger* and compares
+`(pass_flag, evidence_count)` — the agent's "it's better" is never evidence
+(`regression-gate.json` records both run ids, loop paths, terminals, and scores).
+
+**Guardrails.** (1) *No in-place self-modification* — the candidate must be a
+separate manifest; the gate fails closed if candidate path == baseline path.
+(2) *Improvement verified, not claimed* — fail closed unless the candidate
+reaches a PASS terminal and does not regress. (3) *Bounded recursion* — nested
+re-runs go through `run_subloop` (`MAX_LOOP_DEPTH`); one candidate per meta-run.
+(4) *Human gate to land* — output is a PR; promotion to production stays
+human-approved (`skill promote`). (5) *One ledger* — baseline, candidate, and
+meta runs are all linked and replayable.
+
 ## Skill promotion (v0: candidate only)
 
 `skill promote-check` mechanically evaluates the UPSHIFT thresholds against

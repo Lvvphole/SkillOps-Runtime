@@ -1,0 +1,22 @@
+# improve-target — a DELIBERATELY failing baseline loop used to demonstrate
+# recursive self-improvement. The self-improve meta-loop runs this, has the agent
+# write an improved candidate, re-runs the candidate, and the regression gate
+# mechanically confirms the candidate is better. Do not "fix" this file: it is the
+# before-state for the demo.
+loop_id: improve-target
+name: Improve Target (intentionally failing baseline)
+version: "0"
+max_iterations: 20
+default_branch: main
+
+terminal_states:
+  - PASS_TERMINAL
+  - FAIL_RECOVERABLE
+  - ESCALATED_WITH_BLOCKER
+
+steps:
+  - id: broken
+    owner: executor
+    handler: always_fail
+    description: Stand-in for a broken/insufficient step; the baseline fails here.
+    produces: [broken.txt]

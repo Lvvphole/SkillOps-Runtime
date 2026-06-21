@@ -1,0 +1,111 @@
+# self-improve — the recursive self-improvement meta-loop (bounded, gated).
+#
+# It establishes a BASELINE by running a target loop, drives the agent to write
+# an improved CANDIDATE loop (a SEPARATE manifest), re-runs the candidate, and a
+# mechanical regression gate confirms the candidate is not worse than baseline —
+# from the persisted ledger, never from the agent's narrative. On pass it emits a
+# PR with the candidate. It never edits the running/production loop and never
+# self-promotes; nesting is bounded by MAX_LOOP_DEPTH.
+loop_id: self-improve
+name: Self-Improve (recursive, gated)
+version: "0"
+max_iterations: 300
+default_branch: main
+
+terminal_states:
+  - PASS_TERMINAL
+  - PASS_CANDIDATE_PR_CREATED
+  - FAIL_RECOVERABLE
+  - ESCALATED_WITH_BLOCKER
+
+steps:
+  - id: repo-path
+    owner: runtime
+    handler: record_repo_path
+    description: Confirm the repository checkout path exists.
+    produces: [repo-path-confirmation.txt]
+
+  - id: branch-safety
+    owner: runtime
+    handler: branch_safety
+    description: Record branch identity; forbid direct default-branch writes.
+    produces: [branch-safety.txt]
+
+  - id: baseline
+    owner: governor
+    handler: run_subloop
+    description: Run the target loop to record a baseline outcome (record_only).
+    produces: [baseline-result.json, subloop-run.log]
+    params:
+      child_loop: loops/examples/improve-target.yaml
+      result_name: baseline-result.json
+      record_only: true
+
+  - id: improve
+    owner: executor
+    handler: agent_execute
+    description: Drive the agent to write an improved candidate loop (separate manifest).
+    produces: [agent-task.md, agent-output.log]
+    params:
+      # Real use: configure a coding agent CLI, e.g. agent: shell, command: [claude, -p].
+      # The task must instruct the agent to write loops/examples/improve-candidate.yaml.
+      task_file: loops/examples/improve-task.md
+
+  - id: candidate
+    owner: governor
+    handler: run_subloop
+    description: Run the agent's candidate loop to record its outcome (record_only).
+    produces: [candidate-result.json, subloop-run.log]
+    params:
+      child_loop: loops/examples/improve-candidate.yaml
+      result_name: candidate-result.json
+      record_only: true
+
+  - id: gate
+    owner: verifier
+    handler: regression_gate
+    description: Mechanically confirm the candidate improves on baseline (fail closed).
+    produces: [regression-gate.json, improvement-report.md]
+    params:
+      baseline_step: baseline
+      candidate_step: candidate
+
+  - id: tests
+    owner: executor
+    handler: noop
+    description: Meta-level check stand-in over the gate result.
+    produces: [test-results.log]
+
+  - id: verify
+    owner: verifier
+    handler: verifier_report
+    description: Verify the meta-loop's artifacts including the regression gate.
+    produces: [verification-report.md]
+
+  - id: evaluate
+    owner: evaluator
+    handler: evaluator_report
+    description: Score the meta-loop's verified artifacts.
+    produces: [evaluation-report.md]
+
+  # ---- release-gated (only with --release): emit the candidate as a PR ----
+  - id: release-commit
+    owner: executor
+    handler: release_commit
+    release: true
+    description: Record post-commit clean working-tree status.
+    produces: [post-commit-status.txt]
+
+  - id: release-push
+    owner: executor
+    handler: release_push
+    release: true
+    description: Push the feature branch; hard-stop on failure.
+    produces: [push-output.txt]
+
+  - id: release-pr
+    owner: executor
+    handler: release_pr
+    release: true
+    description: Record PR URL and PR documentation (no auto-merge; human-gated).
+    produces: [pr-url.txt, pr-body.md]
