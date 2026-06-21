@@ -1,6 +1,7 @@
 # SkillOps runtime output (generated evidence, not source)
 artifacts/
 skills/*/candidate/
+skills/*/promoted/
 *.db
 __pycache__/
 *.pyc

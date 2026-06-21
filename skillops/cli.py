@@ -16,7 +16,8 @@ import os
 import sys
 from typing import List, Optional
 
-from skillops.promotion import evaluate_upshift, run_promotion_check
+from skillops.promotion import (evaluate_upshift, promote_skill,
+                                run_promotion_check)
 from skillops.runtime import Engine, replay_run, status_run
 from skillops.schemas import SchemaError, validate_loop_file, validate_skill_file
 from skillops.store import Store
@@ -77,6 +78,19 @@ def cmd_skill_promote_check(args) -> int:
         print(a.to_log())
     store.close()
     return 0 if result.eligible else 2
+
+
+def cmd_skill_promote(args) -> int:
+    repo = _repo_root()
+    store = Store(_db_path(repo))
+    result = promote_skill(repo, store, args.skill, args.approve, args.loop)
+    print(f"PROMOTE: {result.terminal_state}")
+    print(f"  skill={result.skill_id}")
+    print(f"  promo_run_id={result.promo_run_id}")
+    print(f"  artifacts_dir={result.artifacts_dir}")
+    print(f"  detail={result.detail}")
+    store.close()
+    return 0 if result.promoted else 2
 
 
 def cmd_loop_run(args) -> int:
@@ -162,6 +176,16 @@ def build_parser() -> argparse.ArgumentParser:
     spc.add_argument("--dry-run", action="store_true",
                      help="assess only; create no candidate")
     spc.set_defaults(func=cmd_skill_promote_check)
+
+    sp = skill_sub.add_parser(
+        "promote",
+        help="human-gated promotion of a candidate skill -> SKILL_PROMOTED")
+    sp.add_argument("--skill", required=True, help="skill id (skills/<id>/skill.yaml)")
+    sp.add_argument("--loop", default=None,
+                    help="comparable loop id (defaults to skill id)")
+    sp.add_argument("--approve", required=True,
+                    help="human approver identity (required; no autonomous promote)")
+    sp.set_defaults(func=cmd_skill_promote)
 
     run = sub.add_parser("run", help="run inspection")
     run_sub = run.add_subparsers(dest="action", required=True)

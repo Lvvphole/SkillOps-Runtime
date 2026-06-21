@@ -13,6 +13,9 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import yaml
+
+from skillops import gitsafety
 from skillops.governor import Decision, Governor
 from skillops.runtime import replay_run
 from skillops.schemas import validate_skill_file
@@ -208,3 +211,181 @@ def _checklist(a: PromotionAssessment) -> str:
 def _write(adir: str, name: str, content: str) -> None:
     with open(os.path.join(adir, name), "w", encoding="utf-8") as fh:
         fh.write(content)
+
+
+# --------------------------------------------------------------------------
+# SKILL_PROMOTED: human-gated candidate -> promoted (v1)
+# --------------------------------------------------------------------------
+@dataclass
+class PromoteResult:
+    skill_id: str
+    terminal_state: Optional[str]
+    promoted: bool
+    artifacts_dir: Optional[str]
+    promo_run_id: Optional[str]
+    detail: str = ""
+
+
+def _escalate(repo: str, store: Store, skill_id: str, reason: str) -> PromoteResult:
+    """Emit ESCALATED_WITH_BLOCKER as a real terminal state with a blocker."""
+    promo_run_id = new_run_id()
+    adir = os.path.join(repo, "artifacts", promo_run_id)
+    os.makedirs(adir, exist_ok=True)
+    store.create_run(promo_run_id, f"promote:{skill_id}", skill_id, adir)
+    ts = {"run_id": promo_run_id, "terminal_state": "ESCALATED_WITH_BLOCKER",
+          "skill_id": skill_id, "blocker": reason, "created_at": now_iso()}
+    _write(adir, "terminal-state.json", json.dumps(ts, indent=2) + "\n")
+    store.add_decision(promo_run_id, None, Decision.ESCALATE.value,
+                       "PROMOTION_BLOCKED", hash_state(ts), ["terminal-state.json"],
+                       "resolve blocker and retry")
+    decs = store.get_decisions(promo_run_id)
+    _write(adir, "decision-history.json", json.dumps(decs, indent=2, default=str) + "\n")
+    for name in ("terminal-state.json", "decision-history.json"):
+        store.register_artifact(promo_run_id, None, name, os.path.join(adir, name))
+    store.update_run(promo_run_id, status="TERMINATED",
+                     terminal_state="ESCALATED_WITH_BLOCKER", completed_at=now_iso())
+    return PromoteResult(skill_id, "ESCALATED_WITH_BLOCKER", False, adir,
+                         promo_run_id, reason)
+
+
+def promote_skill(repo: str, store: Store, skill_id: str, approver: str,
+                  loop_id: Optional[str] = None) -> PromoteResult:
+    """Promote a candidate skill to `promoted`. Fails closed without a human
+    approver, an existing candidate, or UPSHIFT eligibility. Emits SKILL_PROMOTED
+    with the contract-mapped evidence and a registry update. Never autonomous.
+    """
+    loop_id = loop_id or skill_id
+    skill_path = os.path.join(repo, "skills", skill_id, "skill.yaml")
+
+    # Gate 1: human approval (rule 33 - no self-promotion).
+    if not approver or not str(approver).strip():
+        return _escalate(repo, store, skill_id,
+                         "human approver required; promotion is not autonomous")
+
+    # Gate 2: a promotion candidate must already exist.
+    candidate_record = os.path.join(repo, "skills", skill_id, "candidate",
+                                    "promotion-record.json")
+    if not os.path.exists(candidate_record):
+        return _escalate(repo, store, skill_id,
+                         "no promotion candidate; run promote-check first")
+
+    # Gate 3: UPSHIFT eligibility (validation, tests-history, replay, verifier).
+    assessment = evaluate_upshift(store, skill_id, loop_id, skill_path)
+    if not assessment.eligible:
+        failed = [c["criterion"] for c in assessment.criteria if not c["ok"]]
+        return _escalate(repo, store, skill_id,
+                         f"candidate not eligible: {failed}")
+
+    promo_run_id = new_run_id()
+    adir = os.path.join(repo, "artifacts", promo_run_id)
+    os.makedirs(adir, exist_ok=True)
+    store.create_run(promo_run_id, f"promote:{skill_id}", skill_path, adir)
+    governor = Governor()
+
+    # Evidence: tests (the discovered command must pass now). When no test
+    # command is discoverable, the candidate's run-history test evidence stands
+    # (each successful loop run already executed and recorded tests).
+    test_cmds = gitsafety.discover_commands(repo).get("test", [])
+    if test_cmds:
+        cmd = test_cmds[0].split()
+        rc, out = gitsafety.run(cmd, repo)
+        _write(adir, "test-results.log",
+               f"$ {' '.join(cmd)}\nexit={rc}\n\n{out}\n")
+        tests_ok = rc == 0
+    else:
+        _write(adir, "test-results.log",
+               "no project test command discovered; relying on candidate "
+               "run-history test evidence (each successful run recorded tests)\n")
+        tests_ok = True
+    if not tests_ok:
+        store.add_decision(promo_run_id, None, Decision.ESCALATE.value,
+                           "PROMOTION_TESTS_FAILED", hash_state({"cmd": test_cmds}),
+                           ["test-results.log"], "fix tests")
+        _finalize_escalate(store, adir, promo_run_id, skill_id,
+                           "tests failed at promotion time")
+        return PromoteResult(skill_id, "ESCALATED_WITH_BLOCKER", False, adir,
+                             promo_run_id, "tests failed")
+
+    # Evidence: replay of the latest successful comparable run.
+    runs = _loop_runs(store, loop_id)
+    successful = [r for r in runs if r["terminal_state"] in SUCCESS_STATES]
+    replay = replay_run(store, successful[-1]["run_id"])
+    _write(adir, "replay-report.json", json.dumps(replay, indent=2, default=str) + "\n")
+
+    # Evidence: verifier approval (the conjunction of UPSHIFT gates).
+    verifier_approval = {
+        "skill_id": skill_id,
+        "verifier_approves_promotion": True,
+        "criteria": assessment.criteria,
+    }
+    _write(adir, "verifier-approval.json",
+           json.dumps(verifier_approval, indent=2) + "\n")
+
+    # Evidence: promotion record.
+    package_sha = sha256_file(skill_path)
+    record = {
+        "skill_id": skill_id,
+        "approver": str(approver).strip(),
+        "candidate_record": os.path.relpath(candidate_record, repo),
+        "package_sha256": package_sha,
+        "promo_run_id": promo_run_id,
+        "replayed_run": successful[-1]["run_id"],
+        "success_count": assessment.success_count,
+        "pass_rate": round(assessment.pass_rate, 4),
+        "created_at": now_iso(),
+    }
+    _write(adir, "promotion-record.json", json.dumps(record, indent=2) + "\n")
+
+    # Registry update: flip skill.yaml status and write a promoted record.
+    spec = yaml.safe_load(open(skill_path, encoding="utf-8"))
+    old_status = spec.get("status")
+    spec["status"] = "promoted"
+    with open(skill_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(spec, fh, sort_keys=False)
+    promoted_dir = os.path.join(repo, "skills", skill_id, "promoted")
+    os.makedirs(promoted_dir, exist_ok=True)
+    with open(os.path.join(promoted_dir, "promotion-record.json"), "w",
+              encoding="utf-8") as fh:
+        fh.write(json.dumps(record, indent=2) + "\n")
+    registry_update = {
+        "skill_id": skill_id,
+        "package_path": os.path.relpath(skill_path, repo),
+        "old_status": old_status,
+        "new_status": "promoted",
+        "approver": str(approver).strip(),
+        "updated_at": now_iso(),
+    }
+    _write(adir, "registry-update.json", json.dumps(registry_update, indent=2) + "\n")
+
+    terminal = "SKILL_PROMOTED"
+    ts = {"run_id": promo_run_id, "terminal_state": terminal, "skill_id": skill_id,
+          "approver": str(approver).strip(), "created_at": now_iso()}
+    _write(adir, "terminal-state.json", json.dumps(ts, indent=2) + "\n")
+
+    for name in ("promotion-record.json", "test-results.log", "replay-report.json",
+                 "verifier-approval.json", "registry-update.json",
+                 "terminal-state.json"):
+        store.register_artifact(promo_run_id, None, name, os.path.join(adir, name))
+
+    up = governor.upshift("PROMOTION_APPROVED")
+    store.add_decision(promo_run_id, None, Decision.UPSHIFT.value, up.reason_code,
+                       hash_state(record), list(record.keys()), up.next_action)
+    store.add_decision(promo_run_id, None, Decision.STOP.value, "SKILL_PROMOTED",
+                       hash_state(ts), ["terminal-state.json"], "emit terminal state")
+    store.update_run(promo_run_id, status="TERMINATED", terminal_state=terminal,
+                     completed_at=now_iso())
+    return PromoteResult(skill_id, terminal, True, adir, promo_run_id,
+                         f"promoted by {str(approver).strip()}")
+
+
+def _finalize_escalate(store: Store, adir: str, promo_run_id: str, skill_id: str,
+                       reason: str) -> None:
+    ts = {"run_id": promo_run_id, "terminal_state": "ESCALATED_WITH_BLOCKER",
+          "skill_id": skill_id, "blocker": reason, "created_at": now_iso()}
+    _write(adir, "terminal-state.json", json.dumps(ts, indent=2) + "\n")
+    decs = store.get_decisions(promo_run_id)
+    _write(adir, "decision-history.json", json.dumps(decs, indent=2, default=str) + "\n")
+    for name in ("terminal-state.json", "decision-history.json"):
+        store.register_artifact(promo_run_id, None, name, os.path.join(adir, name))
+    store.update_run(promo_run_id, status="TERMINATED",
+                     terminal_state="ESCALATED_WITH_BLOCKER", completed_at=now_iso())

@@ -97,9 +97,21 @@ emits `PROMOTION_CANDIDATE_CREATED` with a candidate package reference,
 validation log, and promotion checklist, plus a durable candidate-registry
 record at `skills/<id>/candidate/promotion-record.json`.
 
-It **never** promotes to production: v0 forbids autonomous production skill
-mutation, so `SKILL_PROMOTED` remains schema-only and requires human approval
-beyond v0.
+It **never** promotes autonomously. Promotion to `promoted` is a separate,
+human-gated step:
+
+```bash
+python -m skillops skill promote --skill coding-pr-gate --approve <approver>
+```
+
+`skill promote` fails closed unless (a) a human `--approve` identity is given,
+(b) a promotion candidate already exists, and (c) the candidate is still
+UPSHIFT-eligible (validation, tests, replay, verifier approval). On pass it
+emits `SKILL_PROMOTED` with the contract-mapped evidence — promotion record,
+tests, replay report, verifier approval, registry update — flips
+`skills/<id>/skill.yaml` to `status: promoted`, and writes a durable
+`skills/<id>/promoted/promotion-record.json`. Re-promoting an already-promoted
+skill fails closed.
 
 ## Data model (SQLite, `artifacts/skillops.db`)
 
